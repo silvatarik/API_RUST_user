@@ -1,8 +1,30 @@
+use std::ops::Deref;
+use std::sync::Arc;
 use uuid::Uuid;
 use crate::user::User;
 
-pub trait Repository {
+pub trait Repository: Send + Sync + 'static {
     fn get_users(&self, user_id: uuid::Uuid) -> Result<User,String>;
+}
+
+pub struct RepositoryInjector(Box<dyn Repository>);
+
+impl RepositoryInjector {
+    pub fn new(repo: impl Repository) -> Self {
+        Self(Box::new(repo))
+    }
+
+    pub fn new_shared(repo: impl Repository) -> Arc<Self> {
+        Arc::new(Self::new(repo))
+    }
+}
+
+impl Deref for RepositoryInjector {
+    type Target = dyn Repository;
+
+    fn deref(&self) -> &<Self as std::ops::Deref>::Target {
+        self.0.as_ref()
+    }
 }
 
 pub struct MemoryRepository {
