@@ -7,10 +7,7 @@ mod user;
 mod health;
 mod v1;
 use crate::repository::RepositoryInjector;
-
 use repository::{MemoryRepository};
-use uuid::Uuid;
-
 
 //Esta funcion recoge del request un parametro name de la req
 async fn greet(req: HttpRequest) -> impl Responder {
@@ -30,7 +27,9 @@ async fn main() -> std::io::Result<()> {
 
     let thread_counter = Arc::new(AtomicU16::new(1));
     //Aqui se aplica el concepto de shadowing
-    let repo = web::Data::new(RepositoryInjector::new(MemoryRepository::default()));
+    //let repo = web::Data::new(RepositoryInjector::new(MemoryRepository::default()));
+    // let repo = RepositoryInjector::new(MemoryRepository::default());
+    let repo = web::Data::new(MemoryRepository::default());
 
     HttpServer::new(move || {
         let thread_index = thread_counter.fetch_add(1, Ordering::SeqCst);
@@ -41,7 +40,7 @@ async fn main() -> std::io::Result<()> {
             .data(thread_index)
             .app_data(repo.clone())
             //El service se suele usar para middleware y llevar un mejor control
-            .configure(v1::service)
+            .configure(v1::service::<MemoryRepository>)
             //Endpoints o rutas que usaran
             .route("/", web::get().to(|| HttpResponse::Ok().body("Hola Rust")))
             //el web::Data sirve a modo de extractor tal como el web::Path
