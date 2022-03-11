@@ -10,7 +10,7 @@ use futures::future::BoxFuture;
 use futures::FutureExt;
 use uuid::Uuid;
 use crate::user::User;
-
+use async_trait::async_trait;
 
 //Errores Personalizados
 use thiserror::Error;
@@ -34,15 +34,14 @@ impl <T> From<PoisonError<T>> for RepositoryError {
     }
 }
 
-type RepositoryResultOutput<T> = Result<T,RepositoryError>;
-//type RepositoryResult<'a ,T> = Pin<Box<dyn Future<Output =RepositoryResultOutput<T>> + 'a >>;
-type RepositoryResult<'a ,T> = BoxFuture<'a , RepositoryResultOutput<T>>;
+type RepositoryResult<T> =  Result<T,RepositoryError>;
 
+#[async_trait]
 pub trait Repository: Send + Sync + 'static {
-    fn get_users<'a>(&'a self, user_id: &'a Uuid) -> RepositoryResult<'a ,User>;
-    fn create_user<'a>(&'a self, user: &'a User) -> RepositoryResult<'a ,User>;
-    fn update_user<'a>(&'a self, user_id: &'a User) -> RepositoryResult<'a ,User>;
-    fn delete_users<'a>(&'a self, user_id: &'a Uuid) -> RepositoryResult<'a ,Uuid>;
+    async fn get_users(&self, user_id: &Uuid) -> RepositoryResult<User>;
+    async fn create_user(&self, user: &User) -> RepositoryResult<User>;
+    async fn update_user(&self, user_id: &User) -> RepositoryResult<User>;
+    async fn delete_users(&self, user_id: &Uuid) -> RepositoryResult<Uuid>;
 }
 
 pub struct RepositoryInjector(Arc<Box<dyn Repository>>);
@@ -63,25 +62,6 @@ impl Clone for RepositoryInjector {
         Self(repo)
     }
 }
-
-// impl FromRequest for RepositoryInjector {
-//     type Error = actix_web::Error;
-//     type Future = Ready<Result<Self,Self::Error>>;
-//     type Config = ();
-//
-//     fn from_request(req: &HttpRequest, _payload: &mut actix_web::dev::Payload) -> Self::Future {
-//
-//         //Acceder al app_data y que nos traiga en el req si tiene un instancia de tipo
-//         //self que en este caso es tipo RepositoryInjector
-//         if let Some(injector) = req.app_data::<Self>(){
-//             let owned_injector = injector.to_owned();
-//             ready(Ok(owned_injector))
-//         }else{
-//             ready(Err(ErrorBadRequest("No injector provided")))
-//         }
-//     }
-// }
-
 impl Deref for RepositoryInjector {
     type Target = dyn Repository;
 
@@ -104,85 +84,44 @@ impl Default for MemoryRepository {
     }
 }
 
+#[async_trait]
 impl Repository for MemoryRepository{
-    fn get_users<'a>(&'a self, user_id: &'a uuid::Uuid) -> RepositoryResult<'a , User> {
-        //Dos formas de hacerlo
-        //Primera ----------------------------------
-        // let r = (||{
-        //     let users = self.users.read()?;
-        //         users.iter()
-        //         .find(|u| &u.id == user_id)
-        //         .cloned()
-        //         // Este metodo no hizo falta debido a que la declaracion de arriba es exactamente la misma
-        //         // .map(|u| u.clone())
-        //         .ok_or_else(|| RepositoryError::InvalidId)
-        // })();
-        //Box::pin(std::future::ready(r))
+    async fn get_users(&self, user_id: &uuid::Uuid) -> RepositoryResult<User> {
+        let users = self.users.read()?;
+            users.iter()
+            .find(|u| &u.id == user_id)
+            .cloned()
+            .ok_or_else(|| RepositoryError::InvalidId)
 
-        //Segunda ----------------------------------
-        let f = async move{
-            let users = self.users.read()?;
-                users.iter()
-                .find(|u| &u.id == user_id)
-                .cloned()
-                // Este metodo no hizo falta debido a que la declaracion de arriba es exactamente la misma
-                // .map(|u| u.clone())
-                .ok_or_else(|| RepositoryError::InvalidId)
-        };
-        //Box::pin(f)
-        f.boxed()
     }
 
-    fn create_user<'a>(&'a self, user: &'a User) ->RepositoryResult<'a ,User> {
-        async move {
-            //Bloquea el thread hasta que termine lo que tenga que hacer
-            // let old_user =  futures::executor::block_on(self.get_users(&user.id));
-            // if old_user.is_ok(){
-            //     return Err(RepositoryError::AlreadyExists);
-            // }
-            if self.get_users(&user.id).await.is_ok(){
-                return Err(RepositoryError::AlreadyExists);
-            }
-            let mut new_user = user.to_owned();
-            new_user.create_at = Some(Utc::now());
+    async fn create_user(&self, user: &User) ->RepositoryResult<User> {
+        if self.get_users(&user.id).await.is_ok(){
+            return Err(RepositoryError::AlreadyExists);
+        }
+        let mut new_user = user.to_owned();
+        new_user.create_at = Some(Utc::now());
+        let mut users = self.users.write().unwrap();
+        users.push(new_user.clone());
+        Ok(new_user)
+    }
+
+    async fn update_user(& self, user: &User) -> RepositoryResult<User> {
+        if let Ok(old_user) = self.get_users(&user.id).await{
+            let mut update_user = user.to_owned();
+            update_user.update_at = old_user.create_at;
             let mut users = self.users.write().unwrap();
-            users.push(new_user.clone());
-            Ok(new_user)
-        }.boxed()
-        //Box::pin(futures::future::ready(r))
+            users.retain(|u| u.id != user.id);
+            users.push(update_user.clone());
+            Ok(update_user)
+        }else{
+            Err(RepositoryError::DoesNotExist)
+        }
     }
 
-    fn update_user<'a>(&'a self, user: &'a User) -> RepositoryResult<'a ,User> {
-        // if self.get_users(&user.id).is_err(){
-        //     return Err(RepositoryError::DoesNotExist);
-        // }
-        // let mut update_user = user.to_owned();
-        // update_user.update_at = Some(Utc::now());
-        // let mut users = self.users.write().unwrap();
-        // users.retain(|u| u.id != user.id);
-        // users.push(update_user.clone());
-        // Ok(update_user)
-        //Box::pin(std::future::ready(Ok(user.to_owned())))
-
-        async move {
-            if let Ok(old_user) = self.get_users(&user.id).await{
-                let mut update_user = user.to_owned();
-                update_user.update_at = old_user.create_at;
-                let mut users = self.users.write().unwrap();
-                users.retain(|u| u.id != user.id);
-                users.push(update_user.clone());
-                Ok(update_user)
-            }else{
-                Err(RepositoryError::DoesNotExist)
-            }
-        }.boxed()
-    }
-
-    fn delete_users<'a>(&'a self, user_id: &'a Uuid) -> RepositoryResult<'a ,Uuid> {
-        async move{
-            let mut users = self.users.write()?;
-            users.retain(|u| u.id != *user_id);
-            Ok(user_id.to_owned())
-        }.boxed()
+    async fn delete_users(&self, user_id: &Uuid) -> RepositoryResult<Uuid> {
+        let mut users = self.users.write()?;
+        users.retain(|u| u.id != *user_id);
+        Ok(user_id.to_owned())
     }
 }
